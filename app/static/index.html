@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zapuza QC - Shopfloor Quality System</title>
+<style>
+  :root { --bg:#f3f5f8; --card:#fff; --ink:#14202e; --mut:#5b6b7d; --line:#d5dce4; --pri:#1f5fbf;
+          --ok:#14803c; --okbg:#dff5e6; --bad:#c0262d; --badbg:#fde3e4; --ctq:#e8710a; --warn:#fff3d6; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:17px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:#14202e; color:#fff; padding:10px 16px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:19px; margin:0 12px 0 0; }
+  select, input, textarea, button { font:inherit; padding:12px 14px; border-radius:10px; border:1px solid var(--line); background:#fff; color:var(--ink); }
+  button { background:var(--pri); color:#fff; border:0; font-weight:600; cursor:pointer; min-height:48px; }
+  button.sec { background:#e6ebf2; color:var(--ink); } button.bad { background:var(--bad); } button.good { background:var(--ok); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  nav { display:flex; gap:8px; padding:10px 16px; flex-wrap:wrap; }
+  nav button { background:#e6ebf2; color:var(--ink); } nav button.on { background:var(--pri); color:#fff; }
+  main { padding:0 16px 40px; max-width:1100px; margin:auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin:12px 0; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .grow { flex:1; min-width:140px; }
+  table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-size:14px; }
+  .pill { display:inline-block; padding:3px 11px; border-radius:99px; background:#e6ebf2; font-size:14px; font-weight:600; }
+  .pill.ok { background:var(--okbg); color:var(--ok); } .pill.bad { background:var(--badbg); color:var(--bad); } .pill.warn { background:var(--warn); }
+  .field { border:2px solid var(--line); border-radius:12px; padding:12px; margin:10px 0; }
+  .field.ctq { border-left:8px solid var(--ctq); } .field.pass { background:var(--okbg); border-color:var(--ok); } .field.fail { background:var(--badbg); border-color:var(--bad); }
+  .ctqtag { color:#fff; background:var(--ctq); border-radius:6px; padding:1px 8px; font-size:13px; font-weight:700; margin-left:6px; }
+  .toast { position:fixed; left:16px; right:16px; bottom:16px; padding:14px 18px; border-radius:12px; color:#fff; z-index:9; background:var(--ok); max-width:900px; margin:auto; }
+  .toast.err { background:var(--bad); }
+  .hold { color:var(--bad); font-weight:700; } small, .mut { color:var(--mut); }
+  textarea { width:100%; min-height:90px; font:14px/1.3 ui-monospace, monospace; }
+  .cond { display:flex; gap:10px; padding:6px 0; } .dot { width:14px; height:14px; border-radius:50%; margin-top:6px; flex:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Zapuza QC</h1>
+  <label>User <select id="user"></select></label>
+  <span id="role" class="pill"></span>
+  <small style="color:#9fb3c8">Factory Operations &amp; Quality Control</small>
+</header>
+<nav id="nav"></nav>
+<main id="main"></main>
+<div id="toast" class="toast" style="display:none"></div>
+
+<script>
+let U = localStorage.getItem('qcUser') || '', users = [], tab = 'jobs', curJob = null, curInsp = null, gauges = [], timer = null;
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const TABS = [['jobs','Jobs & Dispatch'], ['inspect','Inspect'], ['review','Review'], ['templates','Templates'], ['audit','Audit & Alerts']];
+
+function toast(msg, isErr) {
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (isErr ? ' err' : ''); t.style.display = 'block';
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = 'none', isErr ? 7000 : 3000);
+}
+async function api(path, method = 'GET', body) {
+  const r = await fetch('/api' + path, { method, headers: { 'Content-Type': 'application/json', 'X-User-Id': U, 'X-Device-Serial': 'TABLET-WEB-01' },
+                                          body: body === undefined ? undefined : JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const d = j.detail;
+    const msg = d && typeof d === 'object' ? `${d.message}: ${(d.unmet || []).join(' | ')}` : (d || r.statusText);
+    const e = new Error(msg); e.shown = true; toast(msg, true); throw e;
+  }
+  return j;
+}
+const act = fn => async (...a) => { try { await fn(...a); } catch (e) { if (!e.shown) toast(e.message, true); } };
+const roleOf = () => (users.find(u => String(u.id) === String(U)) || {}).role;
+
+async function boot() {
+  users = await (await fetch('/api/users')).json();
+  if (!users.find(u => String(u.id) === String(U))) U = users[0].id;
+  $('#user').innerHTML = users.map(u => `<option value="${u.id}" ${String(u.id) === String(U) ? 'selected' : ''}>${esc(u.name)}</option>`).join('');
+  $('#user').onchange = e => { U = e.target.value; localStorage.setItem('qcUser', U); curInsp = null; render(); };
+  render();
+}
+function render() {
+  $('#role').textContent = roleOf();
+  $('#nav').innerHTML = TABS.map(([k, l]) => `<button class="${tab === k ? 'on' : ''}" onclick="go('${k}')">${l}</button>`).join('');
+  clearInterval(timer);
+  ({ jobs: viewJobs, inspect: viewInspect, review: viewReview, templates: viewTemplates, audit: viewAudit })[tab]();
+}
+function go(k) { tab = k; render(); }
+
+/* ---------------- Jobs / traveler / dispatch ---------------- */
+const viewJobs = act(async () => {
+  const jobs = await api('/jobs');
+  let html = `<div class="card"><div class="row"><b class="grow">Job lots</b>
+    <button class="sec" onclick="newJob()">+ New traveler</button></div>
+    <table><tr><th>Traveler</th><th>Barcode</th><th>Part</th><th>Status</th><th>Ops</th><th>Location</th><th></th></tr>` +
+    jobs.map(j => `<tr><td>${esc(j.traveler_no)}</td><td>${esc(j.barcode)}</td><td>${esc(j.part_no)}</td>
+      <td><span class="pill ${j.status === 'active' ? 'ok' : 'bad'}">${esc(j.status)}</span></td><td>${j.ops_done}/${j.ops_total}</td>
+      <td>${esc(j.location)}</td><td><button class="sec" onclick="openJob(${j.id})">Open</button></td></tr>`).join('') + '</table></div>';
+  $('#main').innerHTML = html + '<div id="jobdetail"></div>';
+  if (curJob) openJob(curJob);
+});
+const newJob = act(async () => {
+  const no = prompt('New traveler number (e.g. 1004):'); if (!no) return;
+  await api('/jobs', 'POST', { traveler_no: no, part_id: 1, ops: [{ name: 'CNC Rough Turning' }, { name: 'Heat Treatment', hold_minutes: 1 },
+    { name: 'Precision Grinding' }, { name: 'Final PDI & Wash' }, { name: 'Packing' }] });
+  toast('Traveler created'); viewJobs();
+});
+async function openJob(id) {
+  curJob = id;
+  const j = await api('/jobs/' + id).catch(() => null); if (!j) return;
+  const mrb = j.status === 'quarantined' ? `<div class="card" style="background:var(--badbg)"><b>Digital Rejection Holding Area - MRB disposition</b>
+      <div class="row"><input id="mrbn" class="grow" placeholder="MRB notes (required)">
+      ${['rework', 'scrap', 'rtv', 'customer_concession'].map(d => `<button class="sec" onclick="mrb(${j.id},'${d}')">${d}</button>`).join('')}</div></div>` : '';
+  const cust = j.status === 'held_customer_approval' ? `<div class="card"><b>Waiting for customer approval</b><div class="row">
+      <input id="cref" class="grow" placeholder="Written approval reference"><button onclick="custApproval(${j.id})">Upload approval</button></div></div>` : '';
+  $('#jobdetail').innerHTML = `${mrb}${cust}<div class="card"><b>Traveler ${esc(j.traveler_no)}</b>
+    <span class="pill ${j.status === 'active' ? 'ok' : 'bad'}">${esc(j.status)}</span> <small>${esc(j.location)}</small>
+    <table><tr><th>Op</th><th>Operation</th><th>Status</th><th>Hold</th><th></th></tr>` +
+    j.ops.map(o => `<tr><td>${o.seq}</td><td>${esc(o.name)}</td><td><span class="pill ${o.status === 'done' ? 'ok' : o.status === 'in_progress' ? 'warn' : ''}">${o.status}</span></td>
+      <td>${o.hold_until && o.hold_remaining_seconds > 0 ? `<span class="hold" data-until="${esc(o.hold_until)}"></span>` : (o.hold_minutes ? '<small>hold ' + o.hold_minutes + ' min</small>' : '')}</td>
+      <td>${o.status === 'pending' ? `<button onclick="op(${j.id},${o.id},'start')">Start</button>` : o.status === 'in_progress' ? `<button class="good" onclick="op(${j.id},${o.id},'complete')">Complete</button>` : ''}</td></tr>`).join('') +
+    `</table></div>
+    <div class="card"><b>Shipping interlock</b> ${j.dispatch.ok ? '<span class="pill ok">CLEAR</span>' : '<span class="pill bad">LOCKED</span>'}
+    ${j.dispatch.conditions.map(c => `<div class="cond"><span class="dot" style="background:${c.ok ? 'var(--ok)' : 'var(--bad)'}"></span><div><b>${esc(c.label)}</b><br><small>${esc(c.detail)}</small></div></div>`).join('')}
+    ${j.gate_pass ? `<p><span class="pill ok">Gate pass ${esc(j.gate_pass.pass_no)} issued</span></p>` : `<button onclick="gatePass(${j.id})">Print gate pass</button>`}
+    <p><small>Inspections: ${j.inspections.map(i => '#' + i.id + ' ' + i.status + (i.is_final ? ' (final)' : '')).join(', ') || 'none'}</small></p></div>`;
+  tickHolds(); clearInterval(timer); timer = setInterval(tickHolds, 1000);
+}
+function tickHolds() {
+  let live = false;
+  document.querySelectorAll('[data-until]').forEach(el => {
+    const left = (new Date(el.dataset.until) - Date.now()) / 1000;
+    if (left > 0) { live = true; const m = Math.floor(left / 60), s = Math.floor(left % 60); el.textContent = `Hold ${m}:${String(s).padStart(2, '0')} remaining`; }
+    else { el.textContent = 'Hold complete'; el.className = ''; }
+  });
+}
+const op = act(async (jid, oid, what) => { await api(`/jobs/${jid}/ops/${oid}/${what}`, 'POST', {}); toast('Operation ' + what + 'ed'); openJob(jid); });
+const mrb = act(async (jid, d) => { await api(`/jobs/${jid}/mrb`, 'POST', { disposition: d, notes: $('#mrbn').value }); toast('MRB disposition: ' + d); viewJobs(); });
+const custApproval = act(async jid => { await api(`/jobs/${jid}/customer-approval`, 'POST', { reference: $('#cref').value }); toast('Customer approval recorded'); viewJobs(); });
+const gatePass = act(async jid => { await api(`/jobs/${jid}/gate-pass`, 'POST', {}); toast('Gate pass issued'); openJob(jid); });
+
+/* ---------------- Inspector ---------------- */
+const viewInspect = act(async () => {
+  gauges = await api('/gauges');
+  if (!curInsp) {
+    const machines = await api('/machines');
+    $('#main').innerHTML = `<div class="card"><b>Open inspection checklist</b>
+      <p class="mut">Manual job search is disabled. Scan the machine QR plate, then the barcode on the Job Traveler.</p>
+      <div class="row"><input id="mqr" class="grow" placeholder="Scan station QR" list="mq"><datalist id="mq">${machines.map(m => `<option value="${esc(m.qr_code)}">${esc(m.code)}</option>`).join('')}</datalist>
+      <input id="tbc" class="grow" placeholder="Scan traveler barcode (e.g. JOB-1001)">
+      <label><input type="checkbox" id="fin" style="width:auto"> Final PDI</label>
+      <button onclick="startInsp()">Open checklist</button></div>
+      <small>Demo scan codes - stations: ${machines.map(m => m.qr_code).join(', ')}; travelers: JOB-1001, JOB-1002, JOB-1003</small></div>`;
+    return;
+  }
+  const i = await api('/inspections/' + curInsp);
+  const locked = i.status !== 'in_progress';
+  $('#main').innerHTML = `<div class="card"><div class="row"><b class="grow">Inspection #${i.id} - Job ${esc(i.job.traveler_no)}${i.is_final ? ' (Final PDI)' : ''}</b>
+      <span class="pill ${i.status === 'frozen' ? 'bad' : ''}">${i.status}</span>
+      <button class="sec" onclick="curInsp=null;viewInspect()">Close</button></div>
+      ${i.status === 'frozen' ? '<p class="hold">CHECKLIST FROZEN - CTQ out of tolerance. Quality Head alerted. Awaiting supervisor decision.</p>' : ''}
+      ${i.fields.map(f => fieldHtml(i, f, locked)).join('')}
+      ${locked ? '' : `<button class="good" onclick="submitInsp(${i.id})">Submit for supervisor review</button>`}</div>`;
+});
+function fieldHtml(i, f, locked) {
+  const v = f.value, cls = v ? (v.result === 'pass' ? 'pass' : 'fail') : '';
+  const input = f.kind === 'visual'
+    ? `<select id="v${f.id}" ${locked ? 'disabled' : ''}><option value="">-</option><option value="yes">Yes</option><option value="no">No</option></select>`
+    : `<input id="v${f.id}" inputmode="decimal" placeholder="value ${esc(f.unit)}" ${locked ? 'disabled' : ''} value="${v ? esc(v.raw_value) : ''}">
+       <select id="g${f.id}" ${locked ? 'disabled' : ''}><option value="">Gauge...</option>${gauges.map(g => `<option ${v && v.gauge_code === g.code ? 'selected' : ''}>${esc(g.code)}</option>`).join('')}</select>`;
+  return `<div class="field ${f.ctq ? 'ctq' : ''} ${cls}"><div><b>${f.seq}. ${esc(f.label)}</b>${f.ctq ? '<span class="ctqtag">CTQ</span>' : ''}
+    <small> &nbsp; allowed: ${esc(f.limits)}</small> ${v ? `<span class="pill ${v.result === 'pass' ? 'ok' : 'bad'}">${v.result.toUpperCase()}: ${esc(v.raw_value)}</span>` : ''}
+    ${f.photo_count ? `<small> ${f.photo_count} photo(s)</small>` : ''}</div>
+    ${locked ? '' : `<div class="row" style="margin-top:8px">${input}<input type="file" id="p${f.id}" accept="image/*" multiple capture="environment">
+    <button onclick="enter(${i.id},${f.id},'${f.kind}')">Record</button></div>`}</div>`;
+}
+const startInsp = act(async () => {
+  const i = await api('/inspections', 'POST', { machine_qr: $('#mqr').value.trim(), traveler_barcode: $('#tbc').value.trim(), is_final: $('#fin').checked });
+  curInsp = i.id; viewInspect();
+});
+const readFile = f => new Promise(res => { const r = new FileReader(); r.onload = () => res({ name: f.name, data: r.result }); r.readAsDataURL(f); });
+const enter = act(async (iid, fid, kind) => {
+  const photos = await Promise.all([...($('#p' + fid).files || [])].map(readFile));
+  const body = { field_id: fid, value: $('#v' + fid).value, photos };
+  if (kind !== 'visual') body.gauge_code = $('#g' + fid).value;
+  const r = await api(`/inspections/${iid}/values`, 'POST', body);
+  toast(r.frozen ? 'CTQ OUT OF TOLERANCE - checklist frozen' : r.in_tolerance ? 'In tolerance' : 'OUT OF TOLERANCE - photos saved', !r.in_tolerance);
+  viewInspect();
+});
+const submitInsp = act(async iid => { await api(`/inspections/${iid}/submit`, 'POST', {}); toast('Submitted to supervisor'); curInsp = null; viewInspect(); });
+
+/* ---------------- Supervisor review ---------------- */
+const viewReview = act(async () => {
+  const q = await api('/review-queue');
+  $('#main').innerHTML = '<div class="card"><b>Pending review</b>' + (q.length ? `<table><tr><th>#</th><th>Job</th><th>Inspector</th><th>Status</th><th>Fails</th><th></th></tr>` +
+    q.map(r => `<tr><td>${r.id}</td><td>${esc(r.traveler_no)}${r.is_final ? ' (final)' : ''}</td><td>${esc(r.inspector)}</td>
+      <td><span class="pill ${r.status === 'frozen' ? 'bad' : 'warn'}">${r.status}</span></td><td>${r.fails}${r.ctq_fails ? ' (CTQ ' + r.ctq_fails + ')' : ''}</td>
+      <td><button class="sec" onclick="reviewOne(${r.id})">Review</button></td></tr>`).join('') + '</table>' : '<p class="mut">Nothing waiting.</p>') + '</div><div id="rv"></div>';
+});
+const reviewOne = act(async id => {
+  const i = await api('/inspections/' + id);
+  $('#rv').innerHTML = `<div class="card"><b>Inspection #${i.id} - Job ${esc(i.job.traveler_no)}</b> <small>by ${esc(i.inspector)}</small>
+    <table><tr><th>Field</th><th>Allowed</th><th>Actual</th><th>Gauge</th><th>Photos</th></tr>` + i.fields.map(f => `<tr><td>${esc(f.label)}${f.ctq ? '<span class="ctqtag">CTQ</span>' : ''}</td>
+    <td>${esc(f.limits)}</td><td><span class="pill ${f.value && f.value.result === 'pass' ? 'ok' : 'bad'}">${f.value ? esc(f.value.raw_value) : '-'}</span></td>
+    <td>${f.value ? esc(f.value.gauge_code || '-') : ''}</td><td>${f.photo_count}</td></tr>`).join('') + `</table>
+    <div class="row" style="margin-top:10px"><select id="rr" class="grow"><option value="">Concession reason code...</option>
+    ${['FUNCTIONAL_OK', 'COSMETIC_ONLY', 'WITHIN_CUSTOMER_AGREEMENT', 'ENGINEERING_WAIVER'].map(c => `<option>${c}</option>`).join('')}</select></div>
+    <textarea id="rj" placeholder="Engineering justification (required for concession)" style="margin-top:8px;font:inherit"></textarea>
+    <div class="row" style="margin-top:8px"><button class="good" onclick="decide(${i.id},'approve')">Approve</button>
+    <button class="sec" onclick="decide(${i.id},'concession')">Conditional concession</button>
+    <button class="bad" onclick="decide(${i.id},'reject')">Reject to holding area</button></div></div>`;
+});
+const decide = act(async (id, d) => {
+  await api(`/inspections/${id}/review`, 'POST', { decision: d, reason_code: $('#rr').value, justification: $('#rj').value });
+  toast('Decision recorded: ' + d); viewReview();
+});
+
+/* ---------------- Templates ---------------- */
+const SAMPLE = JSON.stringify({ part_id: 1, rev: 'B', fields: [
+  { label: 'Shaft Diameter', kind: 'range', nominal: '25.00', upper_tol: '0.05', lower_tol: '-0.02', unit: 'mm', ctq: true },
+  { label: 'Surface Roughness Ra', kind: 'max', limit_value: '0.8', unit: 'um' }, { label: 'Free of burrs', kind: 'visual' }] }, null, 2);
+const viewTemplates = act(async () => {
+  const ts = await api('/templates');
+  $('#main').innerHTML = `<div class="card"><b>Templates (Quality Engineer drafts, Quality Manager releases)</b><table><tr><th>#</th><th>Part</th><th>Rev</th><th>Status</th><th></th></tr>` +
+    ts.map(t => `<tr><td>${t.id}</td><td>${esc(t.part_no)}</td><td>${esc(t.rev)}</td><td><span class="pill ${t.status === 'released' ? 'ok' : ''}">${t.status}</span></td>
+    <td>${t.status === 'draft' ? `<button onclick="release(${t.id})">Approve &amp; release</button>` : ''}</td></tr>`).join('') + `</table></div>
+    <div class="card"><b>New revision (JSON)</b><textarea id="tj" style="min-height:230px">${esc(SAMPLE)}</textarea>
+    <button onclick="mkTemplate()">Create draft</button></div>`;
+});
+const mkTemplate = act(async () => { await api('/templates', 'POST', JSON.parse($('#tj').value)); toast('Draft created'); viewTemplates(); });
+const release = act(async id => { await api(`/templates/${id}/release`, 'POST', {}); toast('Template released'); viewTemplates(); });
+
+/* ---------------- Audit / alerts ---------------- */
+const viewAudit = act(async () => {
+  const [a, al] = await Promise.all([api('/audit?limit=60'), api('/alerts')]);
+  $('#main').innerHTML = `<div class="card"><b>Alerts (simulated email/SMS)</b><table>` + al.slice(0, 10).map(x => `<tr><td>${esc(x.ts.slice(11, 19))}</td><td>${x.channel}</td><td>${esc(x.recipient_role)}</td><td>${esc(x.message)}</td></tr>`).join('') + `</table></div>
+    <div class="card"><b>Immutable audit log (latest 60)</b><table><tr><th>Time</th><th>User</th><th>Action</th><th>Entity</th><th>Old</th><th>New</th></tr>` +
+    a.map(x => `<tr><td>${esc(x.ts.slice(11, 19))}</td><td>${esc(x.user_name)}</td><td>${esc(x.action)}</td><td>${esc(x.entity)} ${esc(x.entity_id)}</td><td><small>${esc(x.old_value || '')}</small></td><td><small>${esc(x.new_value || '')}</small></td></tr>`).join('') + '</table></div>';
+});
+boot();
+</script>
+</body>
+</html>
